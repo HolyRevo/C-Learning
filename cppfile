@@ -1,0 +1,246 @@
+#include <windows.h>
+#include <d3d11.h>
+#include <dwmapi.h>
+#include <tlhelp32.h>
+#include <iostream>
+#include <string>
+#include <vector>
+
+// ImGui includes - Ensure these are linked in your project
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_win32.h"
+#include "imgui/imgui_impl_dx11.h"
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dwmapi.lib")
+
+// --- Math & Structs ---
+struct Vec2 { float x, y; operator ImVec2() const { return ImVec2(x, y); } };
+struct Vec3 { float x, y, z; };
+
+// --- Globals ---
+ID3D11Device* g_pd3dDevice = NULL;
+ID3D11DeviceContext* g_pd3dDeviceContext = NULL;
+IDXGISwapChain* g_pSwapChain = NULL;
+ID3D11RenderTargetView* g_mainRenderTargetView = NULL;
+HANDLE hProcess = NULL;
+uintptr_t baseAddr = 0;
+HWND gameHwnd = NULL;
+HWND overlayHwnd = NULL;
+
+// Settings (Modified via Menu)
+bool showMenu = true;
+bool espEnabled = true;
+bool skeletonEnabled = true;
+bool healthEnabled = true;
+float skeletonThickness = 3.5f;
+bool drawJoints = true;
+
+// --- Helper Functions ---
+uintptr_t GetModuleBase(DWORD procId, const char* modName) {
+    uintptr_t modBaseAddr = 0;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, procId);
+    if (hSnap != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32 modEntry; modEntry.dwSize = sizeof(modEntry);
+        if (Module32First(hSnap, &modEntry)) {
+            do { if (strcmp(modEntry.szModule, modName) == 0) { modBaseAddr = (uintptr_t)modEntry.modBaseAddr; break; }
+            } while (Module32Next(hSnap, &modEntry));
+        }
+    }
+    CloseHandle(hSnap);
+    return modBaseAddr;
+}
+
+bool WorldToScreen(Vec3 pos, Vec2& screen, float m[16], int w, int h) {
+    float clipW = pos.x * m[3] + pos.y * m[7] + pos.z * m[11] + m[15];
+    if (clipW < 0.1f) return false;
+    float clipX = pos.x * m[0] + pos.y * m[4] + pos.z * m[8] + m[12];
+    float clipY = pos.x * m[1] + pos.y * m[5] + pos.z * m[9] + m[13];
+    Vec2 ndc = { clipX / clipW, clipY / clipW };
+    screen.x = (w / 2 * ndc.x) + (ndc.x + w / 2);
+    screen.y = -(h / 2 * ndc.y) + (ndc.y + h / 2);
+    return true;
+}
+
+// --- Menu Input Handler ---
+void UpdateInputState() {
+    static bool lastState = false;
+    if (showMenu != lastState) {
+        long style = GetWindowLong(overlayHwnd, GWL_EXSTYLE);
+        if (showMenu) {
+            SetWindowLong(overlayHwnd, GWL_EXSTYLE, style & ~WS_EX_TRANSPARENT);
+        } else {
+            SetWindowLong(overlayHwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT);
+        }
+        lastState = showMenu;
+    }
+}
+
+// --- Main Drawing Loop ---
+void DrawESP() {
+    if (!espEnabled) return;
+
+    float matrix[16];
+    ReadProcessMemory(hProcess, (void*)(baseAddr + 0x17DFD0), &matrix, sizeof(matrix), NULL);
+    uintptr_t localEnt;
+    ReadProcessMemory(hProcess, (void*)(baseAddr + 0x18AC00), &localEnt, sizeof(localEnt), NULL);
+    uintptr_t entList;
+    ReadProcessMemory(hProcess, (void*)(baseAddr + 0x18AC04), &entList, sizeof(entList), NULL);
+    int players;
+    ReadProcessMemory(hProcess, (void*)(baseAddr + 0x18AC0C), &players, sizeof(players), NULL);
+
+    int myTeam;
+    ReadProcessMemory(hProcess, (void*)(localEnt + 0x204), &myTeam, sizeof(myTeam), NULL);
+
+    RECT r; GetWindowRect(gameHwnd, &r);
+    int w = r.right - r.left, h = r.bottom - r.top;
+    auto draw = ImGui::GetBackgroundDrawList();
+
+    for (int i = 0; i < players; i++) {
+        uintptr_t ent;
+        ReadProcessMemory(hProcess, (void*)(entList + (i * 4)), &ent, sizeof(ent), NULL);
+        if (!ent || ent == localEnt) continue;
+
+        int health; 
+        ReadProcessMemory(hProcess, (void*)(ent + 0xEC), &health, sizeof(health), NULL);
+        if (health <= 0 || health > 100) continue;
+
+        int entTeam;
+        ReadProcessMemory(hProcess, (void*)(ent + 0x204), &entTeam, sizeof(entTeam), NULL);
+
+        // Team Logic: Friend = Green, Enemy = Red
+        ImColor teamColor = (myTeam == entTeam) ? ImColor(0, 255, 0) : ImColor(255, 0, 0);
+
+        Vec3 head, feet;
+        ReadProcessMemory(hProcess, (void*)(ent + 0x4), &head, sizeof(head), NULL);
+        ReadProcessMemory(hProcess, (void*)(ent + 0x28), &feet, sizeof(feet), NULL);
+
+        Vec2 sHead, sFeet;
+        if (WorldToScreen(head, sHead, matrix, w, h) && WorldToScreen(feet, sFeet, matrix, w, h)) {
+            float zHeight = head.z - feet.z;
+            float sHeight = sFeet.y - sHead.y;
+            float limb = 1.2f;
+
+            if (skeletonEnabled) {
+                // 3D Point Generation (Flat Perspective)
+                Vec3 neck = { head.x, head.y, head.z - (zHeight * 0.15f) };
+                Vec3 waist = { feet.x, feet.y, feet.z + (zHeight * 0.45f) };
+                Vec3 lSh = { neck.x - limb, neck.y, neck.z }; Vec3 rSh = { neck.x + limb, neck.y, neck.z };
+                Vec3 lEl = { lSh.x, lSh.y, lSh.z - (zHeight * 0.25f) }; Vec3 rEl = { rSh.x, rSh.y, rSh.z - (zHeight * 0.25f) };
+                Vec3 lKn = { waist.x - (limb * 0.6f), waist.y, waist.z - (zHeight * 0.25f) };
+                Vec3 rKn = { waist.x + (limb * 0.6f), waist.y, waist.z - (zHeight * 0.25f) };
+                Vec3 lFt = { feet.x - (limb * 0.7f), feet.y, feet.z }; Vec3 rFt = { feet.x + (limb * 0.7f), feet.y, feet.z };
+
+                // Screen Translation
+                Vec2 sn, sw, ls, rs, le, re, lk, rk, lf, rf;
+                if (WorldToScreen(neck, sn, matrix, w, h) && WorldToScreen(waist, sw, matrix, w, h) &&
+                    WorldToScreen(lSh, ls, matrix, w, h) && WorldToScreen(rSh, rs, matrix, w, h) &&
+                    WorldToScreen(lEl, le, matrix, w, h) && WorldToScreen(rEl, re, matrix, w, h) &&
+                    WorldToScreen(lKn, lk, matrix, w, h) && WorldToScreen(rKn, rk, matrix, w, h) &&
+                    WorldToScreen(lFt, lf, matrix, w, h) && WorldToScreen(rFt, rf, matrix, w, h)) {
+                    
+                    // Head & Spine
+                    draw->AddCircle(sHead, sHeight / 12.0f, teamColor, 24, skeletonThickness);
+                    draw->AddLine(sn, sw, teamColor, skeletonThickness);
+                    
+                    // Arms (Connected to Neck)
+                    draw->AddLine(sn, ls, teamColor, skeletonThickness); draw->AddLine(ls, le, teamColor, skeletonThickness);
+                    draw->AddLine(sn, rs, teamColor, skeletonThickness); draw->AddLine(rs, re, teamColor, skeletonThickness);
+                    
+                    // Legs (Connected to Waist)
+                    draw->AddLine(sw, lk, teamColor, skeletonThickness); draw->AddLine(lk, lf, teamColor, skeletonThickness);
+                    draw->AddLine(sw, rk, teamColor, skeletonThickness); draw->AddLine(rk, rf, teamColor, skeletonThickness);
+
+                    // Round Joints
+                    if (drawJoints) {
+                        float r = skeletonThickness * 0.7f;
+                        draw->AddCircleFilled(ls, r, teamColor); draw->AddCircleFilled(rs, r, teamColor);
+                        draw->AddCircleFilled(le, r, teamColor); draw->AddCircleFilled(re, r, teamColor);
+                        draw->AddCircleFilled(lk, r, teamColor); draw->AddCircleFilled(rk, r, teamColor);
+                    }
+                }
+            }
+
+            if (healthEnabled) {
+                std::string hText = std::to_string(health) + " HP";
+                draw->AddText({ sHead.x + (sHeight / 6), sHead.y }, teamColor, hText.c_str());
+            }
+        }
+    }
+}
+
+// --- Boilerplate Windows Procedure ---
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
+    if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+// --- Application Entry Point ---
+int main() {
+    DWORD procId = 0;
+    while (!procId) { GetWindowThreadProcessId(FindWindowA(NULL, "AssaultCube"), &procId); Sleep(100); }
+    gameHwnd = FindWindowA(NULL, "AssaultCube");
+    hProcess = OpenProcess(PROCESS_VM_READ, FALSE, procId);
+    baseAddr = GetModuleBase(procId, "ac_client.exe");
+
+    WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "Overlay", NULL };
+    RegisterClassEx(&wc);
+    overlayHwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED, "Overlay", "Hack", WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), NULL, NULL, wc.hInstance, NULL);
+    SetLayeredWindowAttributes(overlayHwnd, RGB(0, 0, 0), 255, LWA_COLORKEY);
+    const MARGINS margins = { -1 }; DwmExtendFrameIntoClientArea(overlayHwnd, &margins);
+
+    DXGI_SWAP_CHAIN_DESC sd = {};
+    sd.BufferCount = 2; sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = overlayHwnd; sd.SampleDesc.Count = 1; sd.Windowed = TRUE; sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, NULL, &g_pd3dDeviceContext);
+    
+    ID3D11Texture2D* pBackBuffer;
+    g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+    g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView);
+    pBackBuffer->Release();
+
+    ShowWindow(overlayHwnd, SW_SHOWDEFAULT);
+    ImGui::CreateContext();
+    ImGui_ImplWin32_Init(overlayHwnd);
+    ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+
+    while (true) {
+        if (GetAsyncKeyState(VK_INSERT) & 1) showMenu = !showMenu;
+        UpdateInputState();
+
+        MSG msg;
+        while (PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE)) {
+            TranslateMessage(&msg); DispatchMessage(&msg);
+            if (msg.message == WM_QUIT) return 0;
+        }
+
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        
+        if (showMenu) {
+            ImGui::SetNextWindowSize({ 300, 200 });
+            ImGui::Begin("Gemini Overlay v2", &showMenu);
+            ImGui::Checkbox("Master ESP", &espEnabled);
+            ImGui::Checkbox("Skeleton", &skeletonEnabled);
+            ImGui::SliderFloat("Thickness", &skeletonThickness, 1.0f, 10.0f);
+            ImGui::Checkbox("Round Joints", &drawJoints);
+            ImGui::Checkbox("Show Health", &healthEnabled);
+            ImGui::Separator();
+            ImGui::Text("Menu Key: INSERT");
+            ImGui::End();
+        }
+
+        DrawESP();
+
+        ImGui::Render();
+        const float clear_color[4] = { 0.f, 0.f, 0.f, 0.f };
+        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
+        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        g_pSwapChain->Present(1, 0);
+    }
+    return 0;
+}

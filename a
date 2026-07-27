@@ -1,0 +1,12 @@
+local ws = game:GetService("Workspace")
+local bf = ws:WaitForChild("MountainDecorations"):WaitForChild("Boulders")
+
+while wait(0.1) do
+    for _, i in pairs(bf:GetChildren()) do
+        for _, i in pairs(i:GetChildren()) do
+            if i:isA("MeshPart") then
+                i.Transparency = 0
+            end
+        end
+    end
+end

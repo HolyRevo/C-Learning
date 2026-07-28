@@ -210,11 +210,11 @@ toggleGuiBtn.Parent = screenGui
 local pickupBtn, mineFrontBtn
 
 if isMobile then
-	pickupBtn = createFloatingButton("Pickup\nOFF", UDim2.new(1, -70, 0.5, -30), currentTheme.Dark)
+	pickupBtn = createFloatingButton("Pickup\nOFF", UDim2.new(0.5, -70, 0.5, -30), currentTheme.Dark)
 	pickupBtn.Parent = screenGui
 	pickupBtn.TextSize = 11
 
-	mineFrontBtn = createFloatingButton("Mine\nOFF", UDim2.new(1, -70, 0.5, 35), currentTheme.Dark)
+	mineFrontBtn = createFloatingButton("Mine\nOFF", UDim2.new(0.5, -70, 0.5, 35), currentTheme.Dark)
 	mineFrontBtn.Parent = screenGui
 	mineFrontBtn.TextSize = 11
 end

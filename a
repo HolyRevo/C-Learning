@@ -1,3 +1,39 @@
+if game.GameID == 81463261330977 then
+local Players = game:GetService("Players")
+local LP = Players.LocalPlayer
+
+-- Safe check: Wait for the character to exist
+local LPC = LP.Character or LP.CharacterAdded:Wait()
+local Backpack = LP:WaitForChild("Backpack")
+
+-- Function to find the first available sword
+local function getSword()
+    return Backpack:FindFirstChild("Requiem") 
+        or Backpack:FindFirstChild("Spine") 
+        or Backpack:FindFirstChild("Bloomreaver")
+        or LPC:FindFirstChild("Requiem")
+        or LPC:FindFirstChild("Spine")
+        or LPC:FindFirstChild("Bloomreaver")
+end
+
+-- Loop to equip and click the sword
+while true do
+    local Sword = getSword()
+    
+    if Sword then
+        -- Tool must be in the Character to activate
+        if Sword.Parent == Backpack then
+            Sword.Parent = LPC 
+        end
+        Sword:Activate()
+    else
+        print("No sword found in Backpack or Character!")
+    end
+    
+    task.wait(0.2)
+end
+
+elseif game.GameID == 125927821145949 then
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
@@ -704,3 +740,6 @@ applyTheme()
 updateUI()
 
 print("[Revo] Loaded in " .. (isMobile and "MOBILE" or "PC") .. " mode")
+
+else
+warn("Not Supported")

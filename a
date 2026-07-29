@@ -27,6 +27,7 @@ local mineFrontEnabled = false
 local digConnection = nil
 local settingsOpen = false
 local guiVisible = true
+local buttonsLocked = false
 
 local pickaxes = {"Eclipse Fang", "Voidreign", "Singularity", "The Terminus"}
 local currentPickaxeIndex = 1
@@ -43,22 +44,23 @@ local themes = {
 local currentThemeIndex = 1
 local currentTheme = themes[1]
 
--- ===================== BOULDER REVEAL =====================
+-- ===================== BOULDER REVEAL (Fixed for mountain resets) =====================
 task.spawn(function()
-	local success, bf = pcall(function()
-		return Workspace:WaitForChild("MountainDecorations"):WaitForChild("Boulders")
-	end)
-	if not success then return end
-
 	while true do
-		for _, boulder in pairs(bf:GetChildren()) do
-			for _, part in pairs(boulder:GetChildren()) do
-				if part:IsA("MeshPart") then
-					part.Transparency = 0
+		local mountain = Workspace:FindFirstChild("MountainDecorations")
+		local boulders = mountain and mountain:FindFirstChild("Boulders")
+
+		if boulders then
+			for _, boulder in pairs(boulders:GetChildren()) do
+				for _, part in pairs(boulder:GetChildren()) do
+					if part:IsA("MeshPart") then
+						part.Transparency = 0
+					end
 				end
 			end
 		end
-		task.wait(0.25)
+
+		task.wait(3)
 	end
 end)
 
@@ -147,7 +149,7 @@ local function switchPickaxe()
 	currentPickaxe = pickaxes[currentPickaxeIndex]
 end
 
--- ===================== FLOATING BUTTON =====================
+-- ===================== FLOATING BUTTON (Fixed Dragging) =====================
 local function createFloatingButton(text, position, color)
 	local btn = Instance.new("TextButton")
 	btn.Size = UDim2.new(0, 52, 0, 52)
@@ -171,24 +173,47 @@ local function createFloatingButton(text, position, color)
 	stroke.Parent = btn
 
 	local dragging = false
-	local dragStart, startPos
+	local dragStart = nil
+	local startPos = nil
+	local dragTouch = nil
 
 	btn.InputBegan:Connect(function(input)
+		-- Only lock on mobile
+		if isMobile and buttonsLocked then return end
+
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			dragStart = input.Position
 			startPos = btn.Position
+			dragTouch = input
 		end
 	end)
 
 	btn.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		if input == dragTouch or input.UserInputType == Enum.UserInputType.MouseButton1 then
 			dragging = false
+			dragTouch = nil
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input == dragTouch then
+			dragging = false
+			dragTouch = nil
 		end
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		if not dragging then return end
+
+		-- PC mouse movement
+		if input.UserInputType == Enum.UserInputType.MouseMovement then
+			local delta = input.Position - dragStart
+			btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+
+		-- Mobile: only follow the same touch
+		if input.UserInputType == Enum.UserInputType.Touch and input == dragTouch then
 			local delta = input.Position - dragStart
 			btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
@@ -353,7 +378,7 @@ digStroke.Parent = digBtn
 
 -- Settings Panel
 local settingsPanel = Instance.new("Frame")
-settingsPanel.Size = UDim2.new(0, 200, 0, 260)
+settingsPanel.Size = UDim2.new(0, 200, 0, 300)
 settingsPanel.Position = UDim2.new(0, -212, 0, 0)
 settingsPanel.BackgroundColor3 = Color3.fromRGB(18, 12, 26)
 settingsPanel.BorderSizePixel = 0
@@ -409,9 +434,24 @@ local promptKeyCorner = Instance.new("UICorner")
 promptKeyCorner.CornerRadius = UDim.new(0, 8)
 promptKeyCorner.Parent = promptKeyBtn
 
+local lockBtn = Instance.new("TextButton")
+lockBtn.Size = UDim2.new(1, -20, 0, 34)
+lockBtn.Position = UDim2.new(0, 10, 0, 128)
+lockBtn.BackgroundColor3 = currentTheme.Dark
+lockBtn.Text = "Lock Buttons: OFF"
+lockBtn.Font = Enum.Font.GothamBold
+lockBtn.TextSize = 13
+lockBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+lockBtn.AutoButtonColor = false
+lockBtn.Parent = settingsPanel
+
+local lockCorner = Instance.new("UICorner")
+lockCorner.CornerRadius = UDim.new(0, 8)
+lockCorner.Parent = lockBtn
+
 local pickupStatus = Instance.new("TextLabel")
 pickupStatus.Size = UDim2.new(1, -20, 0, 22)
-pickupStatus.Position = UDim2.new(0, 10, 0, 130)
+pickupStatus.Position = UDim2.new(0, 10, 0, 172)
 pickupStatus.BackgroundTransparency = 1
 pickupStatus.Text = "Quick Pickup: OFF"
 pickupStatus.Font = Enum.Font.GothamBold
@@ -422,9 +462,9 @@ pickupStatus.Parent = settingsPanel
 
 local infoLabel = Instance.new("TextLabel")
 infoLabel.Size = UDim2.new(1, -20, 0, 80)
-infoLabel.Position = UDim2.new(0, 10, 0, 160)
+infoLabel.Position = UDim2.new(0, 10, 0, 200)
 infoLabel.BackgroundTransparency = 1
-infoLabel.Text = isMobile and "Mobile Mode\n\nR button only hides the menu.\nPickup & Mine buttons stay visible." or "PC Mode\n\nUse mouse aiming + hotkeys."
+infoLabel.Text = isMobile and "Mobile Mode\n\nLock Buttons only works on mobile.\nPrevents accidental moving." or "PC Mode\n\nUse mouse aiming + hotkeys."
 infoLabel.Font = Enum.Font.Gotham
 infoLabel.TextSize = 12
 infoLabel.TextColor3 = Color3.fromRGB(170, 155, 195)
@@ -434,7 +474,6 @@ infoLabel.Parent = settingsPanel
 
 -- ===================== THEME + UPDATE =====================
 local function applyTheme()
-	-- Main elements
 	titleBar.BackgroundColor3 = currentTheme.Accent
 	titleBarFix.BackgroundColor3 = currentTheme.Accent
 	mainStroke.Color = currentTheme.Accent
@@ -446,18 +485,17 @@ local function applyTheme()
 	themeBtn.BackgroundColor3 = currentTheme.Accent
 	themeBtn.Text = "Theme: " .. currentTheme.Name .. " ▼"
 
-	-- All normal buttons get the dark color
 	digBtn.BackgroundColor3 = currentTheme.Dark
 	pickaxeBtn.BackgroundColor3 = currentTheme.Dark
 	keyBtn.BackgroundColor3 = currentTheme.Dark
 	settingsBtn.BackgroundColor3 = currentTheme.Dark
 	promptKeyBtn.BackgroundColor3 = currentTheme.Dark
+	lockBtn.BackgroundColor3 = currentTheme.Dark
 
 	if mineFrontMainBtn then
 		mineFrontMainBtn.BackgroundColor3 = currentTheme.Dark
 	end
 
-	-- Floating buttons (when off)
 	if isMobile then
 		if not promptEnabled then
 			pickupBtn.BackgroundColor3 = currentTheme.Dark
@@ -472,7 +510,6 @@ local function updateUI()
 	local keyName = currentKey.Name
 	pickaxeLabel.Text = "Pickaxe: " .. currentPickaxe
 
-	-- Dig button
 	if spamming then
 		digBtn.Text = isMobile and "Dig Mouse: ON" or ("DIGGING  [" .. keyName .. "]")
 		digBtn.BackgroundColor3 = currentTheme.Accent
@@ -485,7 +522,6 @@ local function updateUI()
 		status.TextColor3 = Color3.fromRGB(180, 160, 200)
 	end
 
-	-- Quick Pickup status
 	if promptEnabled then
 		pickupStatus.Text = "Quick Pickup: ON"
 		pickupStatus.TextColor3 = Color3.fromRGB(100, 255, 140)
@@ -494,7 +530,14 @@ local function updateUI()
 		pickupStatus.TextColor3 = Color3.fromRGB(255, 110, 110)
 	end
 
-	-- Mobile floating buttons
+	if buttonsLocked then
+		lockBtn.Text = "Lock Buttons: ON"
+		lockBtn.BackgroundColor3 = currentTheme.Accent
+	else
+		lockBtn.Text = "Lock Buttons: OFF"
+		lockBtn.BackgroundColor3 = currentTheme.Dark
+	end
+
 	if isMobile then
 		if promptEnabled then
 			pickupBtn.Text = "Pickup\nON"
@@ -516,27 +559,46 @@ local function updateUI()
 	promptKeyBtn.Text = "Pickup Key: " .. promptKey.Name
 end
 
--- ===================== DRAGGING =====================
-local dragging, dragStart, startPos = false, nil, nil
+-- ===================== MAIN WINDOW DRAGGING =====================
+local mainDragging = false
+local mainDragStart, mainStartPos, mainDragTouch
 
 titleBar.InputBegan:Connect(function(input)
+	if isMobile and buttonsLocked then return end
+
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		dragging = true
-		dragStart = input.Position
-		startPos = main.Position
+		mainDragging = true
+		mainDragStart = input.Position
+		mainStartPos = main.Position
+		mainDragTouch = input
 	end
 end)
 
 titleBar.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		dragging = false
+	if input == mainDragTouch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		mainDragging = false
+		mainDragTouch = nil
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input == mainDragTouch then
+		mainDragging = false
+		mainDragTouch = nil
 	end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-		local delta = input.Position - dragStart
-		main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	if not mainDragging then return end
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		local delta = input.Position - mainDragStart
+		main.Position = UDim2.new(mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X, mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y)
+	end
+
+	if input.UserInputType == Enum.UserInputType.Touch and input == mainDragTouch then
+		local delta = input.Position - mainDragStart
+		main.Position = UDim2.new(mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X, mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y)
 	end
 end)
 
@@ -598,6 +660,11 @@ promptKeyBtn.MouseButton1Click:Connect(function()
 	waitingForPromptKey = true
 	promptKeyBtn.Text = "Press a key..."
 	promptKeyBtn.BackgroundColor3 = currentTheme.Accent
+end)
+
+lockBtn.MouseButton1Click:Connect(function()
+	buttonsLocked = not buttonsLocked
+	updateUI()
 end)
 
 UserInputService.InputBegan:Connect(function(input, gp)

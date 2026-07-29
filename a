@@ -1,4 +1,4 @@
-if game.GameID == 81463261330977 then
+if game.PlaceId == 81463261330977 then
 local Players = game:GetService("Players")
 local LP = Players.LocalPlayer
 
@@ -33,7 +33,7 @@ while true do
     task.wait(0.2)
 end
 
-elseif game.GameID == 125927821145949 then
+elseif game.PlaceId == 125927821145949 then
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")

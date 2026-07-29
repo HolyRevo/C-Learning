@@ -1,4 +1,6 @@
+print("script executed")
 if game.PlaceId == 81463261330977 then
+print("script 1")
 local Players = game:GetService("Players")
 local LP = Players.LocalPlayer
 
@@ -34,6 +36,7 @@ while true do
 end
 
 elseif game.PlaceId == 125927821145949 then
+print("script 2")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")

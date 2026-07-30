@@ -1,0 +1,706 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+local camera = Workspace.CurrentCamera
+local DigRequest = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("DigRequest")
+
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- ===================== SETTINGS =====================
+local SPAM_DELAY = 0.11
+local PROMPT_RANGE = 25
+local PROMPT_DELAY = 0.07
+
+local currentKey = Enum.KeyCode.R
+local promptKey = Enum.KeyCode.Q
+local waitingForKey = false
+local waitingForPromptKey = false
+
+local spamming = false
+local promptEnabled = false
+local mineFrontEnabled = false
+local digConnection = nil
+local settingsOpen = false
+local guiVisible = true
+local buttonsLocked = false
+
+local pickaxes = {"Eclipse Fang", "Voidreign", "Singularity", "The Terminus"}
+local currentPickaxeIndex = 1
+local currentPickaxe = pickaxes[1]
+
+local themes = {
+	{Name = "Purple",  Accent = Color3.fromRGB(130, 30, 180), Dark = Color3.fromRGB(45, 20, 70),  Light = Color3.fromRGB(190, 80, 255)},
+	{Name = "Magenta", Accent = Color3.fromRGB(180, 20, 140), Dark = Color3.fromRGB(60, 15, 50),  Light = Color3.fromRGB(255, 70, 200)},
+	{Name = "Blue",    Accent = Color3.fromRGB(30, 90, 200),  Dark = Color3.fromRGB(20, 35, 70),  Light = Color3.fromRGB(80, 160, 255)},
+	{Name = "Red",     Accent = Color3.fromRGB(180, 30, 40),  Dark = Color3.fromRGB(60, 15, 20),  Light = Color3.fromRGB(255, 80, 90)},
+	{Name = "Green",   Accent = Color3.fromRGB(30, 140, 70),  Dark = Color3.fromRGB(15, 45, 30),  Light = Color3.fromRGB(80, 220, 120)},
+	{Name = "Orange",  Accent = Color3.fromRGB(180, 90, 20),  Dark = Color3.fromRGB(60, 35, 15),  Light = Color3.fromRGB(255, 150, 50)},
+}
+local currentThemeIndex = 1
+local currentTheme = themes[1]
+
+-- ===================== BOULDER REVEAL (Fixed for mountain resets) =====================
+task.spawn(function()
+	while true do
+		local mountain = Workspace:FindFirstChild("MountainDecorations")
+		local boulders = mountain and mountain:FindFirstChild("Boulders")
+
+		if boulders then
+			for _, boulder in pairs(boulders:GetChildren()) do
+				for _, part in pairs(boulder:GetChildren()) do
+					if part:IsA("MeshPart") then
+						part.Transparency = 0
+					end
+				end
+			end
+		end
+
+		task.wait(3)
+	end
+end)
+
+-- ===================== PROMPT SYSTEM =====================
+local function spamPrompts()
+	local character = player.Character
+	if not character then return end
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	for _, prompt in pairs(Workspace:GetDescendants()) do
+		if prompt:IsA("ProximityPrompt") and prompt.Enabled then
+			local success, pos = pcall(function()
+				return prompt.Parent.Position
+			end)
+			if success and (pos - root.Position).Magnitude <= PROMPT_RANGE then
+				pcall(fireproximityprompt, prompt)
+			end
+		end
+	end
+end
+
+task.spawn(function()
+	while true do
+		if promptEnabled then
+			spamPrompts()
+		end
+		task.wait(PROMPT_DELAY)
+	end
+end)
+
+-- ===================== SHARED FUNCTIONS =====================
+local function getMouseWorldPosition()
+	local unitRay = camera:ScreenPointToRay(mouse.X, mouse.Y)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {player.Character}
+
+	local result = Workspace:Raycast(unitRay.Origin, unitRay.Direction * 2000, params)
+	if result then return result.Position end
+	return unitRay.Origin + unitRay.Direction * 40
+end
+
+local function getFrontPosition()
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root then
+		return root.Position + (camera.CFrame.LookVector * 9) + Vector3.new(0, 1.2, 0)
+	end
+	return camera.CFrame.Position + camera.CFrame.LookVector * 11
+end
+
+local function startDig(useFront)
+	if digConnection then return end
+	digConnection = RunService.Heartbeat:Connect(function()
+		if not spamming then return end
+		local pos = useFront and getFrontPosition() or getMouseWorldPosition()
+		DigRequest:FireServer(currentPickaxe, pos)
+		task.wait(SPAM_DELAY)
+	end)
+end
+
+local function stopDig()
+	if digConnection then
+		digConnection:Disconnect()
+		digConnection = nil
+	end
+end
+
+local function toggleDig(useFront)
+	spamming = not spamming
+	mineFrontEnabled = useFront and spamming or false
+	if spamming then
+		startDig(useFront)
+	else
+		stopDig()
+	end
+end
+
+local function togglePickup()
+	promptEnabled = not promptEnabled
+end
+
+local function switchPickaxe()
+	currentPickaxeIndex = currentPickaxeIndex % #pickaxes + 1
+	currentPickaxe = pickaxes[currentPickaxeIndex]
+end
+
+-- ===================== FLOATING BUTTON (Fixed Dragging) =====================
+local function createFloatingButton(text, position, color)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(0, 52, 0, 52)
+	btn.Position = position
+	btn.BackgroundColor3 = color
+	btn.Text = text
+	btn.Font = Enum.Font.GothamBlack
+	btn.TextSize = 18
+	btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	btn.TextWrapped = true
+	btn.AutoButtonColor = false
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = btn
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(255, 255, 255)
+	stroke.Thickness = 1.4
+	stroke.Transparency = 0.25
+	stroke.Parent = btn
+
+	local dragging = false
+	local dragStart = nil
+	local startPos = nil
+	local dragTouch = nil
+
+	btn.InputBegan:Connect(function(input)
+		-- Only lock on mobile
+		if isMobile and buttonsLocked then return end
+
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = btn.Position
+			dragTouch = input
+		end
+	end)
+
+	btn.InputEnded:Connect(function(input)
+		if input == dragTouch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+			dragTouch = nil
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input == dragTouch then
+			dragging = false
+			dragTouch = nil
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if not dragging then return end
+
+		-- PC mouse movement
+		if input.UserInputType == Enum.UserInputType.MouseMovement then
+			local delta = input.Position - dragStart
+			btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+
+		-- Mobile: only follow the same touch
+		if input.UserInputType == Enum.UserInputType.Touch and input == dragTouch then
+			local delta = input.Position - dragStart
+			btn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+	end)
+
+	return btn
+end
+
+-- ===================== BUILD UI =====================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "Revolver"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+local toggleGuiBtn = createFloatingButton("R", UDim2.new(1, -70, 0.5, -95), currentTheme.Accent)
+toggleGuiBtn.Parent = screenGui
+
+local pickupBtn, mineFrontBtn
+
+if isMobile then
+	pickupBtn = createFloatingButton("Pickup\nOFF", UDim2.new(0.5, -70, 0.5, -30), currentTheme.Dark)
+	pickupBtn.Parent = screenGui
+	pickupBtn.TextSize = 11
+
+	mineFrontBtn = createFloatingButton("Mine\nOFF", UDim2.new(0.5, -70, 0.5, 35), currentTheme.Dark)
+	mineFrontBtn.Parent = screenGui
+	mineFrontBtn.TextSize = 11
+end
+
+-- Main Window
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 200, 0, isMobile and 257 or 300)
+main.Position = UDim2.new(1, -250, 0.5, isMobile and -150 or -170)
+main.AnchorPoint = Vector2.new(0, 0.5)
+main.BackgroundColor3 = Color3.fromRGB(18, 12, 26)
+main.BorderSizePixel = 0
+main.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 12)
+mainCorner.Parent = main
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = currentTheme.Accent
+mainStroke.Thickness = 1.4
+mainStroke.Transparency = 0.2
+mainStroke.Parent = main
+
+-- Title Bar
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 36)
+titleBar.BackgroundColor3 = currentTheme.Accent
+titleBar.BorderSizePixel = 0
+titleBar.Parent = main
+
+local titleBarCorner = Instance.new("UICorner")
+titleBarCorner.CornerRadius = UDim.new(0, 12)
+titleBarCorner.Parent = titleBar
+
+local titleBarFix = Instance.new("Frame")
+titleBarFix.Size = UDim2.new(1, 0, 0, 14)
+titleBarFix.Position = UDim2.new(0, 0, 1, -14)
+titleBarFix.BackgroundColor3 = currentTheme.Accent
+titleBarFix.BorderSizePixel = 0
+titleBarFix.Parent = titleBar
+
+local logo = Instance.new("Frame")
+logo.Size = UDim2.new(0, 24, 0, 24)
+logo.Position = UDim2.new(0, 10, 0.5, 0)
+logo.AnchorPoint = Vector2.new(0, 0.5)
+logo.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+logo.BorderSizePixel = 0
+logo.Parent = titleBar
+
+local logoCorner = Instance.new("UICorner")
+logoCorner.CornerRadius = UDim.new(1, 0)
+logoCorner.Parent = logo
+
+local logoText = Instance.new("TextLabel")
+logoText.Size = UDim2.new(1, 0, 1, 0)
+logoText.BackgroundTransparency = 1
+logoText.Text = "R"
+logoText.Font = Enum.Font.GothamBlack
+logoText.TextSize = 15
+logoText.TextColor3 = currentTheme.Accent
+logoText.Parent = logo
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -44, 1, 0)
+title.Position = UDim2.new(0, 40, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "REVO"
+title.Font = Enum.Font.GothamBlack
+title.TextSize = 17
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = titleBar
+
+-- Status
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -20, 0, 16)
+status.Position = UDim2.new(0, 12, 0, 44)
+status.BackgroundTransparency = 1
+status.Text = "Status: Idle"
+status.Font = Enum.Font.Gotham
+status.TextSize = 12
+status.TextColor3 = Color3.fromRGB(180, 160, 200)
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Parent = main
+
+local pickaxeLabel = Instance.new("TextLabel")
+pickaxeLabel.Size = UDim2.new(1, -20, 0, 16)
+pickaxeLabel.Position = UDim2.new(0, 12, 0, 62)
+pickaxeLabel.BackgroundTransparency = 1
+pickaxeLabel.Text = "Pickaxe: Eclipse Fang"
+pickaxeLabel.Font = Enum.Font.Gotham
+pickaxeLabel.TextSize = 12
+pickaxeLabel.TextColor3 = currentTheme.Light
+pickaxeLabel.TextXAlignment = Enum.TextXAlignment.Left
+pickaxeLabel.Parent = main
+
+-- Buttons
+local function createButton(text, y)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, -24, 0, 34)
+	btn.Position = UDim2.new(0, 12, 0, y)
+	btn.BackgroundColor3 = currentTheme.Dark
+	btn.Text = text
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 13
+	btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	btn.AutoButtonColor = false
+	btn.Parent = main
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = btn
+	return btn
+end
+
+local digBtn, mineFrontMainBtn, pickaxeBtn, keyBtn, settingsBtn
+
+if isMobile then
+	digBtn      = createButton("Dig Mouse: OFF", 88)
+	pickaxeBtn  = createButton("Switch Pickaxe", 130)
+	keyBtn      = createButton("Change Dig Key", 172)
+	settingsBtn = createButton("Settings", 214)
+else
+	digBtn           = createButton("Dig: OFF  [R]", 88)
+	mineFrontMainBtn = createButton("Mine Front", 130)
+	pickaxeBtn       = createButton("Switch Pickaxe", 172)
+	keyBtn           = createButton("Change Dig Key", 214)
+	settingsBtn      = createButton("Settings", 256)
+end
+
+local digStroke = Instance.new("UIStroke")
+digStroke.Color = currentTheme.Light
+digStroke.Thickness = 1.2
+digStroke.Transparency = 0.3
+digStroke.Parent = digBtn
+
+-- Settings Panel
+local settingsPanel = Instance.new("Frame")
+settingsPanel.Size = UDim2.new(0, 200, 0, 300)
+settingsPanel.Position = UDim2.new(0, -212, 0, 0)
+settingsPanel.BackgroundColor3 = Color3.fromRGB(18, 12, 26)
+settingsPanel.BorderSizePixel = 0
+settingsPanel.Visible = false
+settingsPanel.Parent = main
+
+local settingsPanelCorner = Instance.new("UICorner")
+settingsPanelCorner.CornerRadius = UDim.new(0, 12)
+settingsPanelCorner.Parent = settingsPanel
+
+local settingsStroke = Instance.new("UIStroke")
+settingsStroke.Color = currentTheme.Accent
+settingsStroke.Thickness = 1.3
+settingsStroke.Transparency = 0.2
+settingsStroke.Parent = settingsPanel
+
+local settingsTitle = Instance.new("TextLabel")
+settingsTitle.Size = UDim2.new(1, 0, 0, 32)
+settingsTitle.BackgroundTransparency = 1
+settingsTitle.Text = "SETTINGS"
+settingsTitle.Font = Enum.Font.GothamBlack
+settingsTitle.TextSize = 15
+settingsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+settingsTitle.Parent = settingsPanel
+
+local themeBtn = Instance.new("TextButton")
+themeBtn.Size = UDim2.new(1, -20, 0, 34)
+themeBtn.Position = UDim2.new(0, 10, 0, 40)
+themeBtn.BackgroundColor3 = currentTheme.Accent
+themeBtn.Text = "Theme: Purple ▼"
+themeBtn.Font = Enum.Font.GothamBold
+themeBtn.TextSize = 13
+themeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+themeBtn.AutoButtonColor = false
+themeBtn.Parent = settingsPanel
+
+local themeCorner = Instance.new("UICorner")
+themeCorner.CornerRadius = UDim.new(0, 8)
+themeCorner.Parent = themeBtn
+
+local promptKeyBtn = Instance.new("TextButton")
+promptKeyBtn.Size = UDim2.new(1, -20, 0, 34)
+promptKeyBtn.Position = UDim2.new(0, 10, 0, 84)
+promptKeyBtn.BackgroundColor3 = currentTheme.Dark
+promptKeyBtn.Text = "Pickup Key: Q"
+promptKeyBtn.Font = Enum.Font.Gotham
+promptKeyBtn.TextSize = 13
+promptKeyBtn.TextColor3 = Color3.fromRGB(220, 180, 255)
+promptKeyBtn.AutoButtonColor = false
+promptKeyBtn.Parent = settingsPanel
+
+local promptKeyCorner = Instance.new("UICorner")
+promptKeyCorner.CornerRadius = UDim.new(0, 8)
+promptKeyCorner.Parent = promptKeyBtn
+
+local lockBtn = Instance.new("TextButton")
+lockBtn.Size = UDim2.new(1, -20, 0, 34)
+lockBtn.Position = UDim2.new(0, 10, 0, 128)
+lockBtn.BackgroundColor3 = currentTheme.Dark
+lockBtn.Text = "Lock Buttons: OFF"
+lockBtn.Font = Enum.Font.GothamBold
+lockBtn.TextSize = 13
+lockBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+lockBtn.AutoButtonColor = false
+lockBtn.Parent = settingsPanel
+
+local lockCorner = Instance.new("UICorner")
+lockCorner.CornerRadius = UDim.new(0, 8)
+lockCorner.Parent = lockBtn
+
+local pickupStatus = Instance.new("TextLabel")
+pickupStatus.Size = UDim2.new(1, -20, 0, 22)
+pickupStatus.Position = UDim2.new(0, 10, 0, 172)
+pickupStatus.BackgroundTransparency = 1
+pickupStatus.Text = "Quick Pickup: OFF"
+pickupStatus.Font = Enum.Font.GothamBold
+pickupStatus.TextSize = 13
+pickupStatus.TextColor3 = Color3.fromRGB(255, 110, 110)
+pickupStatus.TextXAlignment = Enum.TextXAlignment.Left
+pickupStatus.Parent = settingsPanel
+
+local infoLabel = Instance.new("TextLabel")
+infoLabel.Size = UDim2.new(1, -20, 0, 80)
+infoLabel.Position = UDim2.new(0, 10, 0, 200)
+infoLabel.BackgroundTransparency = 1
+infoLabel.Text = isMobile and "Mobile Mode\n\nLock Buttons only works on mobile.\nPrevents accidental moving." or "PC Mode\n\nUse mouse aiming + hotkeys."
+infoLabel.Font = Enum.Font.Gotham
+infoLabel.TextSize = 12
+infoLabel.TextColor3 = Color3.fromRGB(170, 155, 195)
+infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+infoLabel.TextYAlignment = Enum.TextYAlignment.Top
+infoLabel.Parent = settingsPanel
+
+-- ===================== THEME + UPDATE =====================
+local function applyTheme()
+	titleBar.BackgroundColor3 = currentTheme.Accent
+	titleBarFix.BackgroundColor3 = currentTheme.Accent
+	mainStroke.Color = currentTheme.Accent
+	settingsStroke.Color = currentTheme.Accent
+	toggleGuiBtn.BackgroundColor3 = currentTheme.Accent
+	logoText.TextColor3 = currentTheme.Accent
+	digStroke.Color = currentTheme.Light
+	pickaxeLabel.TextColor3 = currentTheme.Light
+	themeBtn.BackgroundColor3 = currentTheme.Accent
+	themeBtn.Text = "Theme: " .. currentTheme.Name .. " ▼"
+
+	digBtn.BackgroundColor3 = currentTheme.Dark
+	pickaxeBtn.BackgroundColor3 = currentTheme.Dark
+	keyBtn.BackgroundColor3 = currentTheme.Dark
+	settingsBtn.BackgroundColor3 = currentTheme.Dark
+	promptKeyBtn.BackgroundColor3 = currentTheme.Dark
+	lockBtn.BackgroundColor3 = currentTheme.Dark
+
+	if mineFrontMainBtn then
+		mineFrontMainBtn.BackgroundColor3 = currentTheme.Dark
+	end
+
+	if isMobile then
+		if not promptEnabled then
+			pickupBtn.BackgroundColor3 = currentTheme.Dark
+		end
+		if not mineFrontEnabled then
+			mineFrontBtn.BackgroundColor3 = currentTheme.Dark
+		end
+	end
+end
+
+local function updateUI()
+	local keyName = currentKey.Name
+	pickaxeLabel.Text = "Pickaxe: " .. currentPickaxe
+
+	if spamming then
+		digBtn.Text = isMobile and "Dig Mouse: ON" or ("DIGGING  [" .. keyName .. "]")
+		digBtn.BackgroundColor3 = currentTheme.Accent
+		status.Text = "Status: Digging"
+		status.TextColor3 = currentTheme.Light
+	else
+		digBtn.Text = isMobile and "Dig Mouse: OFF" or ("Dig: OFF  [" .. keyName .. "]")
+		digBtn.BackgroundColor3 = currentTheme.Dark
+		status.Text = "Status: Idle"
+		status.TextColor3 = Color3.fromRGB(180, 160, 200)
+	end
+
+	if promptEnabled then
+		pickupStatus.Text = "Quick Pickup: ON"
+		pickupStatus.TextColor3 = Color3.fromRGB(100, 255, 140)
+	else
+		pickupStatus.Text = "Quick Pickup: OFF"
+		pickupStatus.TextColor3 = Color3.fromRGB(255, 110, 110)
+	end
+
+	if buttonsLocked then
+		lockBtn.Text = "Lock Buttons: ON"
+		lockBtn.BackgroundColor3 = currentTheme.Accent
+	else
+		lockBtn.Text = "Lock Buttons: OFF"
+		lockBtn.BackgroundColor3 = currentTheme.Dark
+	end
+
+	if isMobile then
+		if promptEnabled then
+			pickupBtn.Text = "Pickup\nON"
+			pickupBtn.BackgroundColor3 = currentTheme.Accent
+		else
+			pickupBtn.Text = "Pickup\nOFF"
+			pickupBtn.BackgroundColor3 = currentTheme.Dark
+		end
+
+		if mineFrontEnabled then
+			mineFrontBtn.Text = "Mine\nON"
+			mineFrontBtn.BackgroundColor3 = currentTheme.Accent
+		else
+			mineFrontBtn.Text = "Mine\nOFF"
+			mineFrontBtn.BackgroundColor3 = currentTheme.Dark
+		end
+	end
+
+	promptKeyBtn.Text = "Pickup Key: " .. promptKey.Name
+end
+
+-- ===================== MAIN WINDOW DRAGGING =====================
+local mainDragging = false
+local mainDragStart, mainStartPos, mainDragTouch
+
+titleBar.InputBegan:Connect(function(input)
+	if isMobile and buttonsLocked then return end
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		mainDragging = true
+		mainDragStart = input.Position
+		mainStartPos = main.Position
+		mainDragTouch = input
+	end
+end)
+
+titleBar.InputEnded:Connect(function(input)
+	if input == mainDragTouch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		mainDragging = false
+		mainDragTouch = nil
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input == mainDragTouch then
+		mainDragging = false
+		mainDragTouch = nil
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if not mainDragging then return end
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		local delta = input.Position - mainDragStart
+		main.Position = UDim2.new(mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X, mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y)
+	end
+
+	if input.UserInputType == Enum.UserInputType.Touch and input == mainDragTouch then
+		local delta = input.Position - mainDragStart
+		main.Position = UDim2.new(mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X, mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y)
+	end
+end)
+
+-- ===================== CONNECTIONS =====================
+digBtn.MouseButton1Click:Connect(function()
+	toggleDig(false)
+	updateUI()
+end)
+
+if not isMobile and mineFrontMainBtn then
+	mineFrontMainBtn.MouseButton1Click:Connect(function()
+		toggleDig(true)
+		updateUI()
+	end)
+end
+
+if isMobile then
+	pickupBtn.MouseButton1Click:Connect(function()
+		togglePickup()
+		updateUI()
+	end)
+	mineFrontBtn.MouseButton1Click:Connect(function()
+		toggleDig(true)
+		updateUI()
+	end)
+end
+
+pickaxeBtn.MouseButton1Click:Connect(function()
+	switchPickaxe()
+	updateUI()
+end)
+
+keyBtn.MouseButton1Click:Connect(function()
+	if waitingForKey or waitingForPromptKey then return end
+	waitingForKey = true
+	keyBtn.Text = "Press a key..."
+	keyBtn.BackgroundColor3 = currentTheme.Accent
+end)
+
+settingsBtn.MouseButton1Click:Connect(function()
+	settingsOpen = not settingsOpen
+	settingsPanel.Visible = settingsOpen
+end)
+
+toggleGuiBtn.MouseButton1Click:Connect(function()
+	guiVisible = not guiVisible
+	main.Visible = guiVisible
+end)
+
+themeBtn.MouseButton1Click:Connect(function()
+	currentThemeIndex = currentThemeIndex % #themes + 1
+	currentTheme = themes[currentThemeIndex]
+	applyTheme()
+	updateUI()
+end)
+
+promptKeyBtn.MouseButton1Click:Connect(function()
+	if waitingForKey or waitingForPromptKey then return end
+	waitingForPromptKey = true
+	promptKeyBtn.Text = "Press a key..."
+	promptKeyBtn.BackgroundColor3 = currentTheme.Accent
+end)
+
+lockBtn.MouseButton1Click:Connect(function()
+	buttonsLocked = not buttonsLocked
+	updateUI()
+end)
+
+UserInputService.InputBegan:Connect(function(input, gp)
+	if gp then return end
+
+	if waitingForKey then
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			currentKey = input.KeyCode
+			waitingForKey = false
+			keyBtn.Text = "Change Dig Key"
+			keyBtn.BackgroundColor3 = currentTheme.Dark
+			updateUI()
+		end
+		return
+	end
+
+	if waitingForPromptKey then
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			promptKey = input.KeyCode
+			waitingForPromptKey = false
+			promptKeyBtn.BackgroundColor3 = currentTheme.Dark
+			updateUI()
+		end
+		return
+	end
+
+	if input.KeyCode == currentKey then
+		toggleDig(false)
+		updateUI()
+	elseif input.KeyCode == promptKey then
+		togglePickup()
+		updateUI()
+	end
+end)
+
+applyTheme()
+updateUI()
+
+print("[Revo] Loaded in " .. (isMobile and "MOBILE" or "PC") .. " mode")
